@@ -1,0 +1,15 @@
+[gate]
+allow_threshold      = 0.30   # Below this → Allow silently
+log_threshold        = 0.60   # Below this → AllowWithLog (snapshot taken)
+confirm_threshold    = 0.80   # Below this → RequireUserConfirmation
+block_threshold      = 0.95   # At or above → Hard Block
+confirm_timeout_secs = 30     # Seconds before auto-deny if UI unresponsive
+
+[kill_switch]
+file_ops_per_minute      = 200   # Anomaly threshold for file ops
+network_reqs_per_minute  = 50    # Anomaly threshold for network calls
+
+[rollback]
+max_file_size_mb = 100           # Larger files use MetadataOnlyStrategy
+retention_hours  = 48            # Snapshots purged after this many hours
+vault_path       = ".guardian_vault"

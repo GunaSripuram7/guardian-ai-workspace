@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/guardian-core",
+    "crates/guardian-sensors",
+    "crates/guardian-mcp",
+    "crates/guardian-protection",
+    "crates/guardian-ui",
+    "cli"
+]

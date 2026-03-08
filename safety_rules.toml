@@ -1,0 +1,23 @@
+# Immutable safety rules — stored in Guardian's DB, NOT inside any agent's memory.
+# This solves PDF Problem #2 (context compaction deleting safety rules).
+# The engine matches on abstract tags — NOT hardcoded file paths.
+
+[[rules]]
+rule_type         = "AlwaysBlock"
+scope_tags        = ["role:os_critical"]
+applies_to_agent  = "all"
+
+[[rules]]
+rule_type         = "AlwaysBlock"
+scope_tags        = ["role:credential"]
+applies_to_agent  = "all"
+
+[[rules]]
+rule_type         = "AlwaysRequireConfirmation"
+scope_tags        = ["action:delete", "role:user_data"]
+applies_to_agent  = "all"
+
+[[rules]]
+rule_type         = "NeverAllowScope"
+scope_tags        = ["role:credential"]
+applies_to_agent  = "openclaw"

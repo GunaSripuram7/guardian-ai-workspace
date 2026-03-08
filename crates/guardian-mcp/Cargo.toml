@@ -1,0 +1,16 @@
+[package]
+name = "guardian-mcp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# We depend on our core library to access the database
+guardian-core = { path = "../guardian-core" }
+tokio = { version = "1.36", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# In a real production build we would use the official anthropic mcp-sdk,
+# but for now we will build a lightweight mock MCP handler using standard async tools
+async-trait = "0.1"
+uuid        = { version = "1.0", features = ["v4"] }
+guardian-protection = { path = "../guardian-protection" }
