@@ -40,6 +40,10 @@ impl SafetyRulesEngine {
                     .unwrap_or_default()
                     .as_secs() as i64;
                 let db_lock = db.lock().await;
+                
+                // ── FIX #4: IDEMPOTENT SEEDING ─────────────────────────────────
+                let _ = db_lock.delete_toml_safety_rules();
+            // ── END FIX #4 ─────────────────────────────────────────────────
                 for r in &parsed.rules {
                     let rule_type_str = match r.rule_type.as_str() {
                         "AlwaysBlock"                => "always_block",

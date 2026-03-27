@@ -11,3 +11,7 @@ guardian-mcp = { path = "../crates/guardian-mcp" }
 guardian-protection = { path = "../crates/guardian-protection" }
 tokio = { version = "1.36", features = ["full"] }
 serde_json = "1.0" # <--- ADD THIS LINE
+sysinfo = "0.33"
+# ── FIX: stdio bridge needs HTTP client ───────────────────────────────────────
+reqwest = { version = "0.12", features = ["json"] }
+# ── END FIX ───────────────────────────────────────────────────────────────────

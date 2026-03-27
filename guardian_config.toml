@@ -11,5 +11,21 @@ network_reqs_per_minute  = 50    # Anomaly threshold for network calls
 
 [rollback]
 max_file_size_mb = 100           # Larger files use MetadataOnlyStrategy
-retention_hours  = 48            # Snapshots purged after this many hours
+# ── FIX #9 TESTING: Change to 0.033 (= 2 minutes) to test cleanup ────────────
+# REVERT TO 48 after testing is confirmed
+retention_hours = 48
+# ── END FIX #9 TESTING ────────────────────────────────────────────────────────
 vault_path       = ".guardian_vault"
+
+vault_path       = ".guardian_vault"
+# ↑ existing last line of [rollback] — add below it ↓
+
+[sensors]
+watch_paths = [
+    "C:/Users/tester/Documents",
+    "C:/Users/tester/Desktop",
+    "C:/Users/tester/Downloads",
+    "C:/Users/tester/test_for_gAI"
+]
+poll_interval_secs = 3
+

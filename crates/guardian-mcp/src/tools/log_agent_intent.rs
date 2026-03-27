@@ -51,6 +51,13 @@ impl GuardianTool for LogAgentIntentTool {
             return serde_json::json!({ "error": "target_uri is required." });
         }
 
+         // ── FIX #6: Auto-register agent on first contact ─────────────────────
+        // INSERT OR IGNORE — safe to call every time, never creates duplicates.
+        // This ensures agent_registry is never empty, so risk scoring gets a
+        // real trust_level (30 = new/untrusted) instead of defaulting to 1.0.
+        let _ = db.lock().await.register_agent_if_new(&agent_id);
+        // ── END FIX #6 ───────────────────────────────────────────────────────
+
         let intent = AgentIntent {
             intent_id:  Uuid::new_v4().to_string(),
             agent_id:   agent_id.clone(),
@@ -76,7 +83,10 @@ impl GuardianTool for LogAgentIntentTool {
         // Route through Phase 2 protection pipeline if engine is available
         if let Some(engine) = &self.protection {
             match engine.process_intent(intent).await {
-                ProtectionResult::Permitted { token, assessment } =>
+                ProtectionResult::Permitted { token, assessment } => {
+                    // ── GAP 2: Reward good behavior — increment trust ──────────
+                    let _ = db.lock().await.increment_agent_trust(&agent_id);
+                    // ── END GAP 2 ─────────────────────────────────────────────
                     serde_json::json!({
                         "status":          "permitted",
                         "permission_token": token,
@@ -86,23 +96,32 @@ impl GuardianTool for LogAgentIntentTool {
                             "Action '{}' on '{}' approved. Include permission_token in your action call. Expires in 60s.",
                             action, target_uri
                         )
-                    }),
+                    })
+                },
 
-                ProtectionResult::Denied { reason, assessment } =>
+                ProtectionResult::Denied { reason, assessment } => {
+                    // ── GAP 2: Penalize bad behavior — decay trust by 10 ──────
+                    let _ = db.lock().await.decrement_agent_trust(&agent_id, 10);
+                    // ── END GAP 2 ─────────────────────────────────────────────
                     serde_json::json!({
                         "status":     "denied",
                         "reason":     reason,
                         "risk_score": assessment.score,
                         "triggered_policies": assessment.triggered_policies,
-                    }),
+                    })
+                },
 
-                ProtectionResult::RuleBlocked { rule_id, rule_type } =>
+                ProtectionResult::RuleBlocked { rule_id, rule_type } => {
+                let _ = db.lock().await.decrement_agent_trust(&agent_id, 15);
                     serde_json::json!({
                         "status":    "rule_blocked",
                         "rule_id":   rule_id,
                         "rule_type": rule_type,
                         "message":   "Action blocked by an immutable safety rule. No score computed.",
-                    }),
+                    })
+                    
+                        
+                },
 
                 ProtectionResult::PendingConfirmation { confirmation_id, preview, .. } =>
                     serde_json::json!({

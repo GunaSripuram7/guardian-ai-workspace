@@ -40,7 +40,10 @@ impl RiskScoringEngine {
             if raw > 0.05 {
                 triggered.push(format!("{}={:.2}", policy.name(), raw));
             }
-            let weighted = (raw * policy.weight()).min(1.0);
+            // ── GAP 3: Apply semantic multiplier to every policy score ────────
+            let adjusted = (raw * ctx.semantic_multiplier).min(1.0);
+            let weighted  = (adjusted * policy.weight()).min(1.0);
+            // ── END GAP 3 ─────────────────────────────────────────────────────
             if weighted > weighted_max {
                 weighted_max = weighted;
             }
@@ -60,7 +63,27 @@ impl RiskScoringEngine {
         let recent_event_count =
             db_lock.count_recent_agent_events(&intent.agent_id, 60).ok().unwrap_or(0);
         drop(db_lock);
-        SystemContext { semantic_entity, agent_trust_level, recent_event_count }
+        // ── GAP 3: Compute semantic risk multiplier from entity tags ──────────
+        // Tags like "role:credential" or "role:os_critical" raise ALL policy scores.
+        // Tags like "context:public" lower ALL policy scores.
+        // This means sensitivity travels with the DATA, not the path.
+        let semantic_multiplier = if let Some(entity) = &semantic_entity {
+            let tags = &entity.semantic_tags;
+            if tags.iter().any(|t| t.contains("role:credential") || t.contains("role:os_critical")) {
+                2.0   // Critical resource — double all risk scores
+            } else if tags.iter().any(|t| t.contains("role:system_config")) {
+                1.5   // System config — 50% risk increase
+            } else if tags.iter().any(|t| t.contains("context:public")) {
+                0.5   // Public data — halve the risk
+            } else {
+                1.0   // No adjustment
+            }
+        } else {
+            1.0  // Unknown resource — no adjustment (ScopeAmbiguity handles this)
+        };
+        // ── END GAP 3 context build ───────────────────────────────────────────
+
+        SystemContext { semantic_entity, agent_trust_level, recent_event_count, semantic_multiplier }
     }
 
     /// Map a score to a GateDecision using TOML-loaded thresholds. Not hardcoded.

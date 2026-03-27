@@ -398,5 +398,58 @@ impl Database {
         Ok(())
     }
 
+        // ── FIX #4: Added for idempotent safety rule seeding ────────────────────
+    pub fn delete_toml_safety_rules(&self) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "DELETE FROM safety_rules WHERE created_by = 'safety_rules.toml'",
+            [],
+        )
+    }
+    // ── END ADD ──────────────────────────────────────────────────────────────
 
-}
+    // ── FIX #6: Auto-register agent on first contact ─────────────────────────
+    // INSERT OR IGNORE means the second, third, hundredth call for the same
+    // agent_id is a no-op — no duplicates ever created.
+    // New agents start at trust_level = 30 (Untrusted but known).
+    pub fn register_agent_if_new(&self, agent_id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO agent_registry
+             (agent_id, trust_level, permissions_json)
+             VALUES (?1, 30, '{}')",
+            [agent_id],
+        )?;
+        Ok(())
+    }
+
+        // ── GAP 2 FIX: Trust progression ──────────────────────────────────────────
+    // Called after every PERMITTED action. Increments trust slowly (max 100).
+    // Growth rate is deliberately slow — 1 point per approved action.
+    // An agent needs ~70 clean actions to reach trust_level=100 (verified).
+    // Any block/deny event should call decrement_agent_trust() instead.
+    pub fn increment_agent_trust(&self, agent_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE agent_registry
+             SET trust_level = MIN(100, trust_level + 1)
+             WHERE agent_id = ?1",
+            [agent_id],
+        )?;
+        Ok(())
+    }
+
+    // Called after every BLOCKED or DENIED action. Fast decay — trust drops by 10
+    // per denial. This means a rogue agent gets throttled to max-block score
+    // after just 5 bad actions even if it previously had high trust.
+    pub fn decrement_agent_trust(&self, agent_id: &str, amount: i32) -> Result<()> {
+        self.conn.execute(
+            "UPDATE agent_registry
+             SET trust_level = MAX(0, trust_level - ?2)
+             WHERE agent_id = ?1",
+            rusqlite::params![agent_id, amount],
+        )?;
+        Ok(())
+    }
+    // ── END GAP 2 FIX ─────────────────────────────────────────────────────────
+
+}   
+    
+

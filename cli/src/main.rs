@@ -10,7 +10,10 @@ use guardian_sensors::Sensor;
 use guardian_sensors::fs_sensor::FileSystemSensor;
 use guardian_sensors::process_sensor::ProcessSensor;
 
-use guardian_mcp::{McpRequest, McpServer, QuerySemanticContextTool, GetSystemStateTool};
+use guardian_mcp::{McpServer, QuerySemanticContextTool, GetSystemStateTool};
+use guardian_protection::config::GuardianConfig;
+use sysinfo::System;
+
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -48,11 +51,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (event_tx, mut event_rx) = broadcast::channel::<SystemEvent>(512);
 
     // ── 4. SENSORS ───────────────────────────────────────────────────────────
-    // Change this path to wherever you want to monitor on your machine.
-    let mut fs_sensor   = FileSystemSensor::new("C:\\Users\\chand\\test_for_gAI");
-    let mut proc_sensor = ProcessSensor::new(3); // polls every 3 seconds
+    // Load config early so sensors can use watch_paths + poll_interval.
+    // ProtectionEngine::build() will load it again internally — that is fine,
+    // the file is tiny and reads are instant.
+    let config = GuardianConfig::load("guardian_config.toml");
 
-    fs_sensor.start(event_tx.clone()).await?;
+    for path in &config.sensors.watch_paths {
+        let mut fs = FileSystemSensor::new(path);
+        fs.start(event_tx.clone()).await?;
+        println!("[SENSOR] Watching: {}", path);
+    }
+
+    let mut proc_sensor = ProcessSensor::new(config.sensors.poll_interval_secs);
     proc_sensor.start(event_tx.clone()).await?;
 
     println!("[INIT] EventBus active. Sensors running...\n");
@@ -80,73 +90,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     ));
     mcp_server.register_tool(Box::new(QuerySemanticContextTool));
     mcp_server.register_tool(Box::new(GetSystemStateTool));
+    // ── FIX #10: Register token validation tool ───────────────────────────────
+    mcp_server.register_tool(Box::new(guardian_mcp::ValidateTokenTool));
+    // ── END FIX #10 ──────────────────────────────────────────────────────────
     let mcp_server = Arc::new(mcp_server);
 
 
     println!();
 
-    // ── 7. MOCK AGENT INTERACTION (demonstrates the full flow) ──────────────
-    let test_server = Arc::clone(&mcp_server);
-    let ui_tx_mcp   = ui_tx.clone();
+        // ── 7. MCP GATEWAY — real TCP listener ───────────────────────────────────────
+    let server_for_tcp = Arc::clone(&mcp_server);
     tokio::spawn(async move {
-        tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
-
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        println!("[MOCK AGENT] Connecting to Guardian MCP Gateway...");
-
-        // Test 1: tools/list
-        let list_req = McpRequest {
-            jsonrpc: "2.0".to_string(),
-            id:      Some(serde_json::json!(1)),
-            method:  "tools/list".to_string(),
-            params:  None,
-        };
-        println!("[MOCK AGENT] → tools/list");
-        let res = test_server.process_request(list_req).await;
-        println!("[GUARDIAN]   ← {:?}\n", res.result);
-
-        // Test 2: log_agent_intent (broad: any action, any target)
-        let intent_req = McpRequest {
-            jsonrpc: "2.0".to_string(),
-            id:      Some(serde_json::json!(2)),
-            method:  "tools/call".to_string(),
-            params:  Some(serde_json::json!({
-                "name": "log_agent_intent",
-                "arguments": {
-                    "agent_id":   "mock-agent-v1",
-                    "action":     "read",
-                    "target_uri": "file://C:/Users/chand/test_for_gAI/sample.txt",
-                    "metadata":   { "reason": "user asked to summarise this file" }
-                }
-            })),
-        };
-        println!("[MOCK AGENT] → log_agent_intent (action=read)");
-        let res = test_server.process_request(intent_req).await;
-        println!("[GUARDIAN]   ← {:?}\n", res.result);
-        let _ = ui_tx_mcp.send(UiNotification::info(
-            "Agent Intent Logged",
-            "mock-agent-v1 declared intent to READ sample.txt",
-        )).await;
-
-        // Test 3: get_system_state (all sources, last 5 events)
-        let state_req = McpRequest {
-            jsonrpc: "2.0".to_string(),
-            id:      Some(serde_json::json!(3)),
-            method:  "tools/call".to_string(),
-            params:  Some(serde_json::json!({
-                "name": "get_system_state",
-                "arguments": { "limit": 5 }
-            })),
-        };
-        println!("[MOCK AGENT] → get_system_state (limit=5, all sources)");
-        let res = test_server.process_request(state_req).await;
-        println!("[GUARDIAN]   ← {:?}", res.result);
-        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+        server_for_tcp.serve(3000).await;
     });
+    println!("[INIT] MCP Gateway live → http://127.0.0.1:3000\n");
 
-    // ── 8. CORE SUBSCRIBER LOOP (EventBus → DB + UI notifications) ───────────
-    // This is Phase 1: observe silently, log everything, surface Info notifications.
-    // Phase 2 will add risk scoring here before the UI emit step.
+    // ── 8. PROCESS TREE POPULATION (Fix #7) ──────────────────────────────────────
+    // Scans OS every 10 seconds for known AI agent processes.
+    // Registers their PIDs in ProcessTree so kill switch can actually suspend them.
+    // Pattern table: (process name fragment, guardian agent_id)
+    // To add a new agent: just add a row to agent_patterns — no other changes needed.
+    let process_tree_ref = Arc::clone(&engine.kill_switch.process_tree);
+    tokio::spawn(async move {
+        // Give agents time to start before first scan
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+        let agent_patterns: &[(&str, &str)] = &[
+            ("openclaw",  "openclaw"),
+            ("claude",    "claude-code"),
+        ];
+
+        let mut interval = tokio::time::interval(
+            tokio::time::Duration::from_secs(10)
+        );
+        loop {
+            interval.tick().await;
+            // System::new_all() gives a fresh snapshot — safe to call every 10s
+            let sys = System::new_all();
+            for (pid, process) in sys.processes() {
+                let name = process.name().to_string_lossy().to_lowercase();
+                for (pattern, agent_id) in agent_patterns {
+                    if name.contains(pattern) {
+                        process_tree_ref.register(agent_id, pid.as_u32()).await;
+                        println!("[PROCESS TREE] Registered '{}' → PID {}", agent_id, pid);
+                    }
+                }
+            }
+        }
+    });
+    println!("[INIT] Process tree scanner active.\n");
+    // ── END FIX #7 ───────────────────────────────────────────────────────────────
+
+
+
+
         // ── CORE SUBSCRIBER LOOP ─────────────────────────────────────────────────
     // IMPORTANT: Never block here. Spawn each DB write as its own task so
     // event_rx.recv() is called immediately every time — no dropped events.
@@ -155,20 +152,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             Ok(event) => {
                 println!("[OBSERVED] {} → {}", event.source, event.target_uri);
 
-                // Spawn DB write independently — never block the receiver loop
-                let db_clone    = Arc::clone(&db);
-                let ui_tx_clone = ui_tx.clone();
+                // Sensor events go DIRECTLY to DB — they bypass the protection
+                // engine entirely. Protection only runs for AgentIntent events
+                // that arrive via the log_agent_intent MCP tool.
+                let db_clone = Arc::clone(&db);
+                // ── GAP 4: Pass kill_switch ref into each event handler ───────
+                let ks_clone     = Arc::clone(&engine.kill_switch);
+                let ks_limit     = engine.config.kill_switch.file_ops_per_minute;
+                // ── END GAP 4 ref clones ──────────────────────────────────────
+
                 tokio::spawn(async move {
                     let db_lock = db_clone.lock().await;
                     if let Err(e) = db_lock.insert_event(&event) {
                         eprintln!("[ERROR] DB write failed: {}", e);
                     }
-                    drop(db_lock);
-                    let notif = UiNotification::info(
-                        &format!("Event: {}", event.source),
-                        &format!("{:?} → {}", event.event_type, event.target_uri),
-                    );
-                    let _ = ui_tx_clone.send(notif).await;
+
+                    // ── GAP 4: Count agent file ops and trigger kill switch ────
+                    // Only count agent_intent events (sensor events aren't agents)
+                    if event.source.starts_with("agent_intent.") {
+                        let agent_id = event.source
+                            .strip_prefix("agent_intent.")
+                            .unwrap_or("unknown");
+                        let recent = db_lock
+                            .count_recent_agent_events(agent_id, 60)
+                            .unwrap_or(0) as u32;
+                        drop(db_lock); // Release lock before async call
+                        // recent = ops in last 60 seconds → multiply by 1 for per-minute rate
+                        ks_clone.check_anomaly(agent_id, recent, ks_limit).await;
+                    } else {
+                        drop(db_lock);
+                    }
+                    // ── END GAP 4 ─────────────────────────────────────────────
+                                        
+                    // lock released automatically here (drop at end of scope)
                 });
             }
 

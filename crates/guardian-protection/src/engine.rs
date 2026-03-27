@@ -71,12 +71,16 @@ impl ProtectionEngine {
         );
 
         // Background task: purge expired rollback snapshots every hour
+                // Background task: purge expired rollback snapshots every hour
         let purge_db = Arc::clone(&db);
         let vault_for_purge = Arc::clone(&vault);
         tokio::spawn(async move {
+            // ── FIX #9 TESTING: 30s interval so we can see it fire quickly ────
+            // REVERT TO 3600 after testing is confirmed
             let mut interval = tokio::time::interval(
                 std::time::Duration::from_secs(3600)
             );
+            // ── END FIX #9 TESTING ───────────────────────────────────────────
             loop {
                 interval.tick().await;
                 let expired_paths = purge_db.lock().await
@@ -86,9 +90,10 @@ impl ProtectionEngine {
                     vault_for_purge.delete(p);
                     println!("[VAULT] Purged expired snapshot: {}", p);
                 }
-                if !expired_paths.is_empty() {
-                    println!("[VAULT] Purged {} expired snapshots.", expired_paths.len());
-                }
+                                // ── FIX #9: Always print so we know the task is running ───────
+                println!("[VAULT] Cleanup tick — purged {} expired snapshots.", expired_paths.len());
+                // ── END FIX #9 ───────────────────────────────────────────────
+
             }
         });
 
@@ -136,15 +141,26 @@ impl ProtectionEngine {
             .await;
         println!("[ENGINE] Risk score: {:.2} | Policies: {:?}", assessment.score, assessment.triggered_policies);
 
-        // Step 3: Rollback snapshot if action will be allowed (before it executes)
-        if matches!(assessment.recommended_action,
-            GateDecision::Allow | GateDecision::AllowWithLog)
-        {
-            self.take_snapshot_if_needed(&intent).await;
+        // Step 3: Permission Gate — issues token or denies
+        let result = self.gate.apply(&intent, assessment, Arc::clone(&self.db)).await;
+
+        // Step 4 (Fix #8): Take rollback snapshot AFTER confirmed gate approval.
+        // Old code snapshotted BEFORE gate — wasted I/O if gate later denied.
+        // New code: only snapshot when action is truly approved AND score is
+        // high enough to warrant it (>= log_threshold = 0.60 from config).
+        match &result {
+            ProtectionResult::Permitted { assessment, .. } => {
+                if assessment.score >= self.config.gate.log_threshold {
+                    self.take_snapshot_if_needed(&intent).await;
+                    println!("[VAULT] Snapshot triggered for '{}' by agent '{}'",
+                        intent.target_uri, intent.agent_id);
+                }
+            }
+            _ => {} // No snapshot for blocked/pending/denied actions
         }
 
-        // Step 4: Permission Gate — issues token or denies
-        self.gate.apply(&intent, assessment, Arc::clone(&self.db)).await
+        result
+        // ── END FIX #8 ───────────────────────────────────────────────────────
     }
 
     /// Take a rollback snapshot based on file size. Dispatches to correct strategy.

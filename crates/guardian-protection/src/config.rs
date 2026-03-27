@@ -6,6 +6,7 @@ pub struct GuardianConfig {
     pub gate:         GateConfig,
     pub kill_switch:  KillSwitchConfig,
     pub rollback:     RollbackConfig,
+    pub sensors:      SensorConfig,
 }
 
 /// Gate decision thresholds. All configurable — no hardcoded 0.8 in engine code.
@@ -40,6 +41,18 @@ pub struct RollbackConfig {
     pub vault_path:        String,
 }
 
+// ── ADD THIS ENTIRE STRUCT BELOW ────────────────────────────────────────────
+/// Which folders the file-system sensor watches. Fully configurable — no
+/// recompile needed to add or remove watch paths.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SensorConfig {
+    /// List of absolute folder paths to watch recursively.
+    pub watch_paths:         Vec<String>,
+    /// How often ProcessSensor polls sysinfo (seconds).
+    pub poll_interval_secs:  u64,
+}
+// ── END ADD ──────────────────────────────────────────────────────────────────
+
 impl Default for GuardianConfig {
     fn default() -> Self {
         Self {
@@ -58,6 +71,15 @@ impl Default for GuardianConfig {
                 max_file_size_mb: 100,
                 retention_hours:  48,
                 vault_path:       ".guardian_vault".to_string(),
+            },
+            sensors: SensorConfig {
+                watch_paths: vec![
+                    "C:/Users/tester/Documents".to_string(),
+                    "C:/Users/tester/Desktop".to_string(),
+                    "C:/Users/tester/Downloads".to_string(),
+                    "C:/Users/tester/test_for_gAI".to_string(),
+                ],
+                poll_interval_secs: 3,
             },
         }
     }

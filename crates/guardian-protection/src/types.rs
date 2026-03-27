@@ -71,4 +71,7 @@ pub struct SystemContext {
     pub semantic_entity:    Option<guardian_core::types::SemanticEntity>,
     pub agent_trust_level:  Option<i32>,
     pub recent_event_count: usize,
+     // ── GAP 3: ADD THIS FIELD ─────────────────────────────────────────────────
+    pub semantic_multiplier: f32,
+    // ── END ADD ───────────────────────────────────────────────────────────────
 }

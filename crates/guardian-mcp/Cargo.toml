@@ -14,3 +14,10 @@ serde_json = "1.0"
 async-trait = "0.1"
 uuid        = { version = "1.0", features = ["v4"] }
 guardian-protection = { path = "../guardian-protection" }
+# ── HTTP SERVER (replaces raw TCP so OpenClaw can connect) ────────────────────
+# ── SSE transport for MCP protocol ───────────────────────────────────────────
+# ── END ADD ───────────────────────────────────────────────────────────────────
+axum = { version = "0.7", features = ["macros", "json"] }
+async-stream = "0.3"
+futures-core = "0.3"
+# ── END ADD ───────────────────────────────────────────────────────────────────
