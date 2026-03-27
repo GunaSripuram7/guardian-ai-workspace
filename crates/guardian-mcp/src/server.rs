@@ -28,11 +28,14 @@ pub struct McpRequest {
     pub params:  Option<Value>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 pub struct McpResponse {
     pub jsonrpc: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub id:      Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub result:  Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error:   Option<Value>,
 }
 
@@ -61,10 +64,12 @@ pub struct McpServer {
 async fn sse_handler(
     State(state): State<SseAppState>,
 ) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
-    let session_id   = uuid::Uuid::new_v4().to_string();
+    let session_id = uuid::Uuid::new_v4().to_string();
     let (tx, mut rx) = mpsc::channel::<String>(32);
     state.sessions.lock().await.insert(session_id.clone(), tx);
-    let endpoint_url = format!("{}/mcp/{}", state.base_url, session_id);
+
+    // mcporter expects an endpoint event that tells it where to POST JSON-RPC.
+    let endpoint_url = format!("{}/messages?sessionId={}", state.base_url, session_id);
     println!("[MCP SSE] New session: {}", &session_id[..8]);
 
     let stream = async_stream::stream! {
@@ -81,8 +86,8 @@ async fn mcp_messages_handler(
     Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
     Json(req): Json<McpRequest>,
-) -> StatusCode {
-    let session_id = params
+) -> impl IntoResponse {
+    let mut session_id = params
         .get("sessionId").cloned()
         .or_else(|| params.get("session_id").cloned())
         .or_else(|| {
@@ -93,34 +98,105 @@ async fn mcp_messages_handler(
         .unwrap_or_default();
 
     if session_id.is_empty() {
-        eprintln!("[MCP] Missing session ID on POST /messages");
-        return StatusCode::BAD_REQUEST;
+        // Some clients normalize away query params; if only one live session exists,
+        // route to that session as a compatibility fallback.
+        let fallback = {
+            let sessions = state.sessions.lock().await;
+            if sessions.len() == 1 {
+                sessions.keys().next().cloned()
+            } else {
+                None
+            }
+        };
+        if let Some(sid) = fallback {
+            session_id = sid;
+        } else {
+            eprintln!("[MCP] Missing session ID on POST /messages");
+            let err = McpResponse {
+                jsonrpc: "2.0".to_string(),
+                id: None,
+                result: None,
+                error: Some(serde_json::json!({
+                    "code": -32602,
+                    "message": "Missing session ID"
+                })),
+            };
+            return (StatusCode::BAD_REQUEST, Json(err));
+        }
     }
 
-    let response     = state.server.process_request(req).await;
+    let method = req.method.clone();
+    let response = state.server.process_request(req).await;
     let response_str = serde_json::to_string(&response).unwrap_or_default();
+    println!("[MCP] POST /messages for session {} method {}", &session_id[..8], method);
 
     let tx_opt = { state.sessions.lock().await.get(&session_id).cloned() };
     match tx_opt {
-        Some(tx) => if tx.send(response_str).await.is_ok() { StatusCode::ACCEPTED } else { StatusCode::GONE },
-        None     => { eprintln!("[MCP] No session: {}", &session_id); StatusCode::NOT_FOUND }
+        Some(tx) => {
+            if tx.send(response_str).await.is_ok() {
+                println!("[MCP] SSE push ok for session {}", &session_id[..8]);
+            } else {
+                eprintln!("[MCP] SSE receiver closed for session {}", &session_id[..8]);
+            }
+        }
+        None => eprintln!("[MCP] No session: {}", &session_id),
     }
+
+    // Compatibility: also return JSON directly for clients that expect an
+    // immediate HTTP response body instead of waiting on SSE message events.
+    (StatusCode::OK, Json(response))
 }
 
 async fn mcp_session_path_handler(
     State(state): State<SseAppState>,
     Path(session_id): Path<String>,
     Json(req): Json<McpRequest>,
-) -> StatusCode {
+) -> impl IntoResponse {
+    let method = req.method.clone();
     let response     = state.server.process_request(req).await;
     let response_str = serde_json::to_string(&response).unwrap_or_default();
+    println!("[MCP] POST /mcp/:session_id for session {} method {}", &session_id[..8], method);
 
     let tx_opt = { state.sessions.lock().await.get(&session_id).cloned() };
     match tx_opt {
-        Some(tx) => if tx.send(response_str).await.is_ok() { StatusCode::ACCEPTED } else { StatusCode::GONE },
-        None     => { eprintln!("[MCP] No session: {}", &session_id); StatusCode::NOT_FOUND }
+        Some(tx) => {
+            if tx.send(response_str).await.is_ok() {
+                println!("[MCP] SSE push ok for /mcp session {}", &session_id[..8]);
+            } else {
+                eprintln!("[MCP] SSE receiver closed for /mcp session {}", &session_id[..8]);
+            }
+        }
+        None => eprintln!("[MCP] No session: {}", &session_id),
     }
+
+    (StatusCode::OK, Json(response))
 }
+
+async fn mcp_session_path_messages_handler(
+    State(state): State<SseAppState>,
+    Path(session_id): Path<String>,
+    Json(req): Json<McpRequest>,
+) -> impl IntoResponse {
+    let method = req.method.clone();
+    let response     = state.server.process_request(req).await;
+    let response_str = serde_json::to_string(&response).unwrap_or_default();
+    println!("[MCP] POST /messages/:session_id for session {} method {}", &session_id[..8], method);
+
+    let tx_opt = { state.sessions.lock().await.get(&session_id).cloned() };
+    match tx_opt {
+        Some(tx) => {
+            if tx.send(response_str).await.is_ok() {
+                println!("[MCP] SSE push ok for /messages path session {}", &session_id[..8]);
+            } else {
+                eprintln!("[MCP] SSE receiver closed for /messages path session {}", &session_id[..8]);
+            }
+        }
+        None => eprintln!("[MCP] No session path: {}", &session_id),
+    }
+
+    (StatusCode::OK, Json(response))
+}
+
 
 async fn handle_get_root() -> impl IntoResponse {
     (StatusCode::OK, Json(serde_json::json!({
@@ -169,6 +245,7 @@ impl McpServer {
         .route("/",        post(handle_mcp_http).get(handle_get_root))
         .route("/sse",     get(sse_handler))
         .route("/messages", post(mcp_messages_handler))
+        .route("/messages/:session_id", post(mcp_session_path_messages_handler))
         .route("/mcp/:session_id", post(mcp_session_path_handler))
         .route("/.well-known/oauth-protected-resource",   get(no_auth_handler))
         .route("/.well-known/oauth-authorization-server", get(no_auth_handler))
